@@ -150,40 +150,44 @@ impl MediaOrganizer {
         }
     }
 
-    pub fn update_disc_totals(&mut self, artist_name: &str, album_name: &str) {
-        // Find the greatest value of disc_number for the specified artist and album
-        let max_disc_number: Option<i32> = track_files::table
-            .filter(
-                track_files::artist
-                    .eq(artist_name)
-                    .and(track_files::album.eq(album_name)),
-            )
-            .select(max(track_files::disc_number))
-            .first(&mut self.connection)
-            .expect("Error finding max disc number");
+    pub async fn update_disc_totals(&mut self) {
+        use diesel::dsl::max;
+        use diesel::prelude::*;
 
-        if let Some(max_disc_number) = max_disc_number {
-            // Update the disc_total for all tracks with the specified artist and album
-            diesel::update(
-                track_files::table.filter(
-                    track_files::artist
-                        .eq(artist_name)
-                        .and(track_files::album.eq(album_name)),
-                ),
-            )
-            .set(track_files::disc_total.eq(max_disc_number))
-            .execute(&mut self.connection)
-            .expect("Error updating disc total");
+        let connection = &mut self.connection;
 
-            println!(
-                "Updated disc_total to {} for artist: {}, album: {}",
-                max_disc_number, artist_name, album_name
-            );
-        } else {
-            println!(
-                "No tracks found for artist: {}, album: {}",
-                artist_name, album_name
-            );
+        let artist_albums = track_files::table
+            .select((track_files::artist, track_files::album))
+            .distinct()
+            .load::<(Option<String>, Option<String>)>(connection)
+            .expect("Error loading artist albums");
+
+        for (artist, album) in artist_albums {
+            if let (Some(artist), Some(album)) = (artist, album) {
+                let max_disc_number = track_files::table
+                    .filter(track_files::artist.eq(&artist))
+                    .filter(track_files::album.eq(&album))
+                    .select(max(track_files::disc_number))
+                    .first::<Option<i32>>(connection)
+                    .expect("Error finding max disc number");
+
+                if let Some(disc_total) = max_disc_number {
+                    if (disc_total > 1) {
+                        println!(
+                            "Updating disc total for {} - {} to {}",
+                            artist, album, disc_total
+                        );
+                    }
+                    diesel::update(
+                        track_files::table
+                            .filter(track_files::artist.eq(&artist))
+                            .filter(track_files::album.eq(&album)),
+                    )
+                    .set(track_files::disc_total.eq(disc_total))
+                    .execute(connection)
+                    .expect("Error updating disc total");
+                }
+            }
         }
     }
 
@@ -245,68 +249,10 @@ impl MediaOrganizer {
 
         Ok(results)
     }
-
-    pub async fn find_and_add_missing_year_to_tracks(
-        &mut self,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let arl = env::var("DEEZER_ARL").expect("DEEZER_ARL must be set");
-        let sid = env::var("DEEZER_SID").expect("DEEZER_SID must be set");
-        let refresh_token =
-            env::var("DEEZER_REFRESH_TOKEN").expect("DEEZER_REFRESH_TOKEN must be set");
-
-        let tracks_with_missing_year = track_files::table
-            .filter(track_files::year.is_null())
-            // .limit(1)
-            .load::<TrackFile>(&mut self.connection)
-            .expect("Error loading tracks with missing year");
-
-        for mut track in tracks_with_missing_year {
-            let track_artist = track.artist.clone();
-            let track_album = track.album.clone();
-
-            musicbrainz_rs::config::set_user_agent("my_awesome_app/1.0");
-
-            let query = ReleaseSearchQuery::query_builder()
-                .artist(&track_artist.unwrap())
-                .and()
-                .release(&track_album.unwrap())
-                .build();
-            let query_result = Release::search(query).execute().await?;
-
-            let original_release = query_result
-                .entities
-                .iter()
-                .filter(|release| release.date.is_some())
-                .min_by_key(|release| release.date.as_ref().unwrap());
-
-            track.year = original_release.map(|release| {
-                let date_str = release
-                    .date
-                    .as_ref()
-                    .unwrap()
-                    .format("%Y-%m-%d")
-                    .to_string();
-                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap();
-                date.year()
-            });
-
-            // Save the updated track back to the database
-            diesel::update(track_files::table.find(track.id))
-                .set(track_files::year.eq(track.year))
-                .execute(&mut self.connection)
-                .expect("Error updating track year");
-        }
-        Ok(())
-    }
-
-    pub async fn find_missing_metadata(&mut self) {
-        self.find_and_add_missing_year_to_tracks().await;
-    }
-
     pub fn move_media_by_metadata(&mut self, base_dir: &str) {
         let tracks = track_files::table
             .filter(track_files::processed.eq(false))
-            // .limit(10)
+            // .limit(10000)
             .load::<TrackFile>(&mut self.connection)
             .expect("Error loading tracks");
 
@@ -317,8 +263,8 @@ impl MediaOrganizer {
             let title = sanitize(track.title.unwrap());
             let year = track.year.unwrap();
             let track_number = track.track_number.unwrap();
-            let disc_number = track.disc_number.unwrap();
-            let disc_total = track.disc_total.unwrap();
+            let disc_number = track.disc_number.unwrap_or_else(|| 1);
+            let disc_total = track.disc_total.unwrap_or_else(|| 1);
 
             let mut target_path = format!("{}/{}", base_dir, artist);
             if !std::path::Path::new(&target_path).exists() {
@@ -332,8 +278,8 @@ impl MediaOrganizer {
                 fs::create_dir_all(&target_path).expect("Error creating album directory");
             }
 
-            if (disc_total > 1) {
-                target_path = format!("{}/Disc {:02}", target_path, disc_number);
+            if disc_total > 1 {
+                target_path = format!("{}/CD {:02}", target_path, disc_number);
                 if !std::path::Path::new(&target_path).exists() {
                     println!("Creating directory: {}", target_path);
                     fs::create_dir_all(&target_path).expect("Error creating disc directory");
@@ -344,6 +290,8 @@ impl MediaOrganizer {
                 "{}/{:02} - {}.{}",
                 target_path, track_number, title, extension
             );
+
+            println!("Moving file from {} to {}", track.path, target_path);
 
             match fs::rename(&track.path, &target_path) {
                 Ok(_) => {

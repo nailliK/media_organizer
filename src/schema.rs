@@ -8,10 +8,10 @@ diesel::table! {
         artist -> Nullable<Text>,
         album -> Nullable<Text>,
         title -> Nullable<Text>,
-        year -> Nullable<Integer>,
         track_number -> Nullable<Integer>,
         disc_number -> Nullable<Integer>,
         disc_total -> Nullable<Integer>,
+        year -> Nullable<Integer>,
         processed -> Bool,
     }
 }
