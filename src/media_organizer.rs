@@ -134,6 +134,42 @@ impl MediaOrganizer {
         }
     }
 
+    pub fn find_and_remove_duplicates(&mut self) {
+        println!("Finding duplicates in database");
+
+        let track_files = track_files::table
+            .load::<TrackFile>(&mut self.connection)
+            .expect("Error loading track files");
+
+        let mut duplicates: Vec<Vec<TrackFile>> = Vec::new();
+
+        for (i, track_file) in track_files.iter().enumerate() {
+            let mut found = false;
+            for other_track_file in &track_files[i + 1..] {
+                if track_file.artist == other_track_file.artist
+                    && track_file.album == other_track_file.album
+                    && track_file.title == other_track_file.title
+                    && track_file.year == other_track_file.year
+                {
+                    found = true;
+                    if let Some(duplicate_group) = duplicates
+                        .iter_mut()
+                        .find(|group| group.contains(track_file))
+                    {
+                        duplicate_group.push(other_track_file.clone());
+                    } else {
+                        duplicates.push(vec![track_file.clone(), other_track_file.clone()]);
+                    }
+                }
+            }
+        }
+
+        // Process duplicates as needed
+        for group in duplicates {
+            println!("Found duplicate group: {:?}", group);
+        }
+    }
+
     pub fn parse_media_directory(&mut self, dir_name: &str) {
         println!("Parsing directory: {}", dir_name);
 

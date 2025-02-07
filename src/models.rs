@@ -1,7 +1,7 @@
 use crate::schema::track_files;
 use diesel::prelude::*;
 
-#[derive(Debug, Queryable, Selectable)]
+#[derive(Debug, Queryable, Selectable, Clone, PartialEq)]
 #[diesel(table_name = track_files)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct TrackFile {
